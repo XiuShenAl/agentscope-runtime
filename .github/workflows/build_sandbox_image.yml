@@ -126,96 +126,26 @@ jobs:
             runtime-sandbox-builder "$TYPE" --platform "$PLATFORM_INPUT"
           done
 
-      - name: Tag & Push Images
-        env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-          ALIYUN_ACR_USERNAME: ${{ secrets.ALIYUN_ACR_USERNAME }}
-          ALIYUN_ACR_PASSWORD: ${{ secrets.ALIYUN_ACR_PASSWORD }}
+      - name: Export and Package Images
         run: |
-          TAG_INPUT="${{ github.event.inputs.tag }}"
-          if [ -z "$TAG_INPUT" ]; then
-            TAG_INPUT=$(date +%Y%m%d)
-          fi
-          SINGLE="${{ github.event.inputs.single_arch }}"
-          ARCH_TAG="${{ github.event.inputs.platform }}"
-          if [ "$SINGLE" = "true" ]; then
-            ARCH_TAG="linux/amd64"
-          fi
+          mkdir -p ./images
+
           IFS=',' read -ra TYPES <<< "${{ github.event.inputs.build_types }}"
           for TYPE in "${TYPES[@]}"; do
+            echo "Processing type: $TYPE"
+
             IMAGE_BASE=$(python -c "from src.agentscope_runtime.sandbox.registry import SandboxRegistry; print(SandboxRegistry.get_image_by_type('$TYPE'))")
-            IMAGE_NAME="${IMAGE_BASE%%:*}"
-            if [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
-              if [ "$SINGLE" = "true" ]; then
-                docker tag "$IMAGE_BASE" "docker.io/${IMAGE_NAME}:${TAG_INPUT}"
-                docker push "docker.io/${IMAGE_NAME}:${TAG_INPUT}"
-              else
-                ARCH_SUFFIX=$(echo "$ARCH_TAG" | tr '/' '-')
-                docker tag "$IMAGE_BASE" "docker.io/${IMAGE_NAME}:${TAG_INPUT}-${ARCH_SUFFIX}"
-                docker push "docker.io/${IMAGE_NAME}:${TAG_INPUT}-${ARCH_SUFFIX}"
-              fi
-            fi
-            if [ -n "$ALIYUN_ACR_USERNAME" ] && [ -n "$ALIYUN_ACR_PASSWORD" ]; then
-              REGISTRY="agentscope-registry.ap-southeast-1.cr.aliyuncs.com"
-              if [ "$SINGLE" = "true" ]; then
-                docker tag "$IMAGE_BASE" "${REGISTRY}/${IMAGE_NAME}:${TAG_INPUT}"
-                docker push "${REGISTRY}/${IMAGE_NAME}:${TAG_INPUT}"
-              else
-                ARCH_SUFFIX=$(echo "$ARCH_TAG" | tr '/' '-')
-                docker tag "$IMAGE_BASE" "${REGISTRY}/${IMAGE_NAME}:${TAG_INPUT}-${ARCH_SUFFIX}"
-                docker push "${REGISTRY}/${IMAGE_NAME}:${TAG_INPUT}-${ARCH_SUFFIX}"
-              fi
-            fi
+
+            echo "Exporting image: $IMAGE_BASE"
+
+            SAFE_NAME=$(echo $TYPE | tr '/' '_')
+
+            docker save "$IMAGE_BASE" | gzip > "./images/sandbox_${SAFE_NAME}.tar.gz"
           done
 
-      - name: Create Multi-arch Manifest for DockerHub
-        env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-        if: ${{ github.event.inputs.single_arch == 'false' && env.DOCKER_USERNAME != '' && env.DOCKER_PASSWORD != '' }}
-        run: |
-          TAG_INPUT="${{ github.event.inputs.tag }}"
-          if [ -z "$TAG_INPUT" ]; then
-            TAG_INPUT=$(date +%Y%m%d)
-          fi
-          IFS=',' read -ra TYPES <<< "${{ github.event.inputs.build_types }}"
-          for TYPE in "${TYPES[@]}"; do
-            IMAGE_BASE=$(python -c "from src.agentscope_runtime.sandbox.registry import SandboxRegistry; print(SandboxRegistry.get_image_by_type('$TYPE'))")
-            IMAGE_NAME="${IMAGE_BASE%%:*}"
-            AMD_TAG="docker.io/${IMAGE_NAME}:${TAG_INPUT}-linux-amd64"
-            ARM_TAG="docker.io/${IMAGE_NAME}:${TAG_INPUT}-linux-arm64"
-            COMMON_TAG="docker.io/${IMAGE_NAME}:${TAG_INPUT}"
-            if docker manifest inspect "$AMD_TAG" >/dev/null 2>&1 && docker manifest inspect "$ARM_TAG" >/dev/null 2>&1; then
-              docker manifest create "$COMMON_TAG" --amend "$AMD_TAG" --amend "$ARM_TAG"
-              docker manifest push "$COMMON_TAG"
-            else
-              echo "Missing architecture image in DockerHub, skipping manifest creation."
-            fi
-          done
-
-      - name: Create Multi-arch Manifest for Aliyun ACR
-        env:
-          ALIYUN_ACR_USERNAME: ${{ secrets.ALIYUN_ACR_USERNAME }}
-          ALIYUN_ACR_PASSWORD: ${{ secrets.ALIYUN_ACR_PASSWORD }}
-        if: ${{ github.event.inputs.single_arch == 'false' && env.ALIYUN_ACR_USERNAME != '' && env.ALIYUN_ACR_PASSWORD != '' }}
-        run: |
-          TAG_INPUT="${{ github.event.inputs.tag }}"
-          if [ -z "$TAG_INPUT" ]; then
-            TAG_INPUT=$(date +%Y%m%d)
-          fi
-          REG="agentscope-registry.ap-southeast-1.cr.aliyuncs.com"
-          IFS=',' read -ra TYPES <<< "${{ github.event.inputs.build_types }}"
-          for TYPE in "${TYPES[@]}"; do
-            IMAGE_BASE=$(python -c "from src.agentscope_runtime.sandbox.registry import SandboxRegistry; print(SandboxRegistry.get_image_by_type('$TYPE'))")
-            IMAGE_NAME="${IMAGE_BASE%%:*}"
-            AMD_TAG="${REG}/${IMAGE_NAME}:${TAG_INPUT}-linux-amd64"
-            ARM_TAG="${REG}/${IMAGE_NAME}:${TAG_INPUT}-linux-arm64"
-            COMMON_TAG="${REG}/${IMAGE_NAME}:${TAG_INPUT}"
-            if docker manifest inspect "$AMD_TAG" >/dev/null 2>&1 && docker manifest inspect "$ARM_TAG" >/dev/null 2>&1; then
-              docker manifest create "$COMMON_TAG" --amend "$AMD_TAG" --amend "$ARM_TAG"
-              docker manifest push "$COMMON_TAG"
-            else
-              echo "Missing architecture image in Aliyun ACR, skipping manifest creation."
-            fi
-          done
+      - name: Upload Image Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-images-${{ github.event.inputs.platform }}
+          path: ./images/*.tar.gz
+          retention-days: 1
